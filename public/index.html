@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Employee Management System</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+:root{color-scheme:light} body{background:#f4f6fb}.field{width:100%;border:1px solid #d8deea;border-radius:10px;padding:.65rem .75rem;background:#fff;outline:none;transition:.15s}.field:focus{border-color:#4f46e5;box-shadow:0 0 0 3px rgba(79,70,229,.10)}.label{font-size:.82rem;font-weight:600;color:#334155}.card{background:#fff;border:1px solid #e8ebf2;border-radius:18px;box-shadow:0 5px 18px rgba(15,23,42,.04)}.hiddenx{display:none!important}.navbtn{display:flex;align-items:center;gap:.7rem;width:100%;padding:.7rem .8rem;border-radius:10px;color:#cbd5e1;text-align:left}.navbtn:hover,.navbtn.active{background:#1e293b;color:#fff}.modal{background:rgba(15,23,42,.45);backdrop-filter:blur(3px)}
+</style>
+</head>
+<body class="text-slate-800">
+<div id="toast" class="fixed right-5 top-5 z-[100] hiddenx"></div>
+
+<!-- LOGIN -->
+<div id="login" class="min-h-screen flex items-center justify-center p-5 bg-slate-50">
+  <div class="card w-full max-w-md p-8">
+    <div class="w-12 h-12 rounded-2xl bg-indigo-600 text-white flex items-center justify-center text-xl font-bold mb-5">E</div>
+    <h1 class="text-2xl font-bold">Employee Management</h1>
+    <p class="text-slate-500 mt-1 mb-7">Admin portal · Employee Register</p>
+    <form onsubmit="login(event)">
+      <label class="label">Admin Password<input id="loginPass" type="password" autocomplete="current-password" class="field mt-1.5" placeholder="Enter password" required></label>
+      <button class="w-full mt-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl py-3 font-semibold">Sign in</button>
+    </form>
+    <p id="loginErr" class="text-red-600 text-sm mt-3 min-h-5"></p>
+    <p class="text-xs text-slate-400 mt-6">Demo password is configured through the ADMIN_PASSWORD environment variable.</p>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" class="hiddenx min-h-screen">
+  <aside id="sidebar" class="fixed inset-y-0 left-0 w-64 bg-slate-950 text-white p-5 z-30 hidden lg:block">
+    <div class="flex items-center gap-3 mb-8"><div class="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center font-bold">E</div><div><div class="font-bold">EMS</div><div class="text-xs text-slate-400">Employee Register</div></div></div>
+    <nav class="space-y-1">
+      <button class="navbtn active" data-view="dashboard" onclick="show('dashboard')">▦ <span>Dashboard</span></button>
+      <button class="navbtn" data-view="employees" onclick="show('employees')">◉ <span>Employees</span></button>
+      <button class="navbtn" data-view="form" onclick="startAdd()">＋ <span>Add Employee</span></button>
+      <button class="navbtn" onclick="document.getElementById('file').click()">⇩ <span>Import Excel</span></button>
+      <button class="navbtn" onclick="exportExcel()">⇧ <span>Export Excel</span></button>
+    </nav>
+    <div class="absolute bottom-5 left-5 right-5"><button class="navbtn" onclick="logout()">↪ <span>Logout</span></button></div>
+    <input id="file" type="file" accept=".xlsx,.xls" class="hidden" onchange="importExcel(this.files[0]);this.value=''">
+  </aside>
+
+  <div class="lg:ml-64">
+    <header class="sticky top-0 z-20 bg-white/90 backdrop-blur border-b border-slate-200 px-5 lg:px-8 py-4 flex items-center justify-between">
+      <div><h2 id="title" class="text-xl lg:text-2xl font-bold">Dashboard</h2><p class="text-xs lg:text-sm text-slate-500">Employee records and administration</p></div>
+      <div class="flex items-center gap-2"><button class="lg:hidden border rounded-lg px-3 py-2" onclick="toggleMobileNav()">☰</button><button onclick="startAdd()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-3 lg:px-4 py-2.5 rounded-xl font-semibold">+ Add Employee</button></div>
+    </header>
+
+    <main class="p-5 lg:p-8 max-w-[1600px] mx-auto">
+      <!-- DASHBOARD -->
+      <section id="dashboard" class="view">
+        <div class="grid sm:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div class="card p-5"><p class="text-sm text-slate-500">Total Employees</p><p id="total" class="text-3xl font-bold mt-2">0</p></div>
+          <div class="card p-5"><p class="text-sm text-slate-500">Active</p><p id="active" class="text-3xl font-bold mt-2">0</p></div>
+          <div class="card p-5"><p class="text-sm text-slate-500">Exited</p><p id="exited" class="text-3xl font-bold mt-2">0</p></div>
+          <div class="card p-5"><p class="text-sm text-slate-500">Added This Month</p><p id="monthAdded" class="text-3xl font-bold mt-2">0</p></div>
+        </div>
+        <div class="card mt-5 p-5"><div class="flex items-center justify-between mb-4"><h3 class="font-bold">Recent Employees</h3><button onclick="show('employees')" class="text-indigo-600 text-sm font-semibold">View all →</button></div><div id="recent" class="divide-y"></div></div>
+      </section>
+
+      <!-- EMPLOYEES -->
+      <section id="employees" class="view hiddenx">
+        <div class="card p-5">
+          <div class="flex flex-col lg:flex-row gap-3 lg:items-center lg:justify-between mb-5"><div class="flex gap-2 flex-1"><input id="search" class="field" placeholder="Search ID, name, site, designation, mobile..." oninput="renderTable()"><button onclick="load()" class="border px-4 rounded-xl">Refresh</button></div><div id="countLabel" class="text-sm text-slate-500"></div></div>
+          <div class="overflow-auto"><table class="w-full min-w-[900px] text-sm"><thead class="bg-slate-50"><tr class="border-b text-left"><th class="p-3">SR</th><th class="p-3">Employee ID</th><th class="p-3">Employee</th><th class="p-3">Site</th><th class="p-3">Designation</th><th class="p-3">Mobile</th><th class="p-3">Status</th><th class="p-3">Actions</th></tr></thead><tbody id="tbody"></tbody></table></div>
+        </div>
+      </section>
+
+      <!-- FORM -->
+      <section id="form" class="view hiddenx">
+        <form id="employeeForm" onsubmit="saveEmployee(event)" class="space-y-5">
+          <input type="hidden" id="editId">
+          <div class="card p-5 lg:p-6"><div class="flex justify-between items-start mb-5"><div><h3 class="text-lg font-bold">Personal Information</h3><p class="text-sm text-slate-500">Basic identity details</p></div></div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <label class="label">Employee ID *<input id="employee_id" class="field mt-1.5" required></label><label class="label">Employee Name<input id="employee_name" class="field mt-1.5"></label><label class="label">Surname<input id="surname" class="field mt-1.5"></label><label class="label">Gender<input id="gender" class="field mt-1.5"></label><label class="label">Father/Spouse Name<input id="father_spouse_name" class="field mt-1.5"></label><label class="label">Date of Birth<input id="date_of_birth" type="date" class="field mt-1.5" oninput="calcAge()"></label><label class="label">Age on Current Date<input id="age" class="field mt-1.5 bg-slate-50" readonly></label><label class="label">Nationality<input id="nationality" class="field mt-1.5" value="IND"></label><label class="label">Education Level<input id="education_level" class="field mt-1.5"></label><label class="label sm:col-span-2 lg:col-span-3">Mark for Identification<input id="mark_for_identification" class="field mt-1.5"></label>
+          </div></div>
+
+          <div class="card p-5 lg:p-6"><h3 class="text-lg font-bold mb-1">Employment Information</h3><p class="text-sm text-slate-500 mb-5">Site, joining and employment details</p><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <label class="label">Site Code<input id="site_code" class="field mt-1.5"></label><label class="label">Pending Remark<input id="pending_remark" class="field mt-1.5"></label><label class="label">Date of Joining<input id="date_of_joining" type="date" class="field mt-1.5"></label><label class="label">Designation<input id="designation" class="field mt-1.5"></label><label class="label">Category (MS/S/SS/US)<input id="category" class="field mt-1.5"></label><label class="label">Type of Employment<input id="type_of_employment" class="field mt-1.5"></label><label class="label">Service Book No.<input id="service_book_no" class="field mt-1.5"></label><label class="label">Date of Exit<input id="date_of_exit" type="date" class="field mt-1.5"></label><label class="label">Reason of Exit<input id="reason_exit" class="field mt-1.5"></label>
+          </div></div>
+
+          <div class="card p-5 lg:p-6"><h3 class="text-lg font-bold mb-1">Contact & Statutory Information</h3><p class="text-sm text-slate-500 mb-5">Government and contact details</p><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <label class="label">Mobile No.<input id="mobile_no" inputmode="numeric" class="field mt-1.5"></label><label class="label">UAN<input id="uan" class="field mt-1.5"></label><label class="label">PAN<input id="pan" class="field mt-1.5"></label><label class="label">ESIC IP<input id="esic_ip" class="field mt-1.5"></label><label class="label">LWF<input id="lwf" class="field mt-1.5"></label><label class="label">Aadhaar<input id="aadhaar" inputmode="numeric" class="field mt-1.5"></label>
+          </div><div class="grid lg:grid-cols-2 gap-4 mt-4"><label class="label">Present Address<textarea id="present_address" rows="3" class="field mt-1.5"></textarea></label><label class="label">Permanent Address<textarea id="permanent_address" rows="3" class="field mt-1.5"></textarea></label></div></div>
+
+          <div class="card p-5 lg:p-6"><h3 class="text-lg font-bold mb-1">Bank & Documents</h3><p class="text-sm text-slate-500 mb-5">Bank details, photo and specimen signature</p><div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-4"><label class="label">Bank A/C No.<input id="bank_account_no" class="field mt-1.5"></label><label class="label">Bank Name<input id="bank_name" class="field mt-1.5"></label><label class="label">IFSC (Branch)<input id="ifsc_branch" class="field mt-1.5"></label><label class="label">Remark<input id="remark" class="field mt-1.5"></label></div>
+            <div class="grid lg:grid-cols-2 gap-5 mt-6"><div><label class="label">Employee Photo<input id="photo" type="file" accept="image/jpeg,image/png,image/webp" class="field mt-1.5" onchange="preview(this,'photoPreview')"></label><img id="photoPreview" class="mt-3 w-32 h-36 object-cover rounded-xl border hiddenx" alt="Photo preview"></div><div><label class="label">Specimen Signature<input id="signature" type="file" accept="image/jpeg,image/png,image/webp" class="field mt-1.5" onchange="preview(this,'signaturePreview')"></label><img id="signaturePreview" class="mt-3 w-56 h-28 object-contain rounded-xl border bg-white hiddenx" alt="Signature preview"></div></div>
+            <div class="mt-6 flex flex-wrap gap-3"><button id="saveBtn" class="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl font-semibold">Save Employee</button><button type="button" onclick="resetForm();show('employees')" class="border px-5 py-3 rounded-xl">Cancel</button></div><p id="formMsg" class="text-sm mt-3 min-h-5"></p>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+</div>
+
+<!-- PROFILE MODAL -->
+<div id="profileModal" class="modal fixed inset-0 z-50 hiddenx p-4 flex items-center justify-center"><div class="bg-white rounded-2xl w-full max-w-5xl max-h-[92vh] overflow-auto shadow-2xl"><div class="sticky top-0 bg-white border-b p-5 flex items-center justify-between"><div><h3 id="profileTitle" class="text-xl font-bold">Employee Profile</h3><p class="text-sm text-slate-500">Complete employee record</p></div><button onclick="closeProfile()" class="text-2xl text-slate-400">×</button></div><div id="profileBody" class="p-5"></div></div></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
