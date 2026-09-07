@@ -1,0 +1,12 @@
+{
+  "name": "employee-management-system",
+  "version": "2.0.0",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": { "dev": "vercel dev", "start": "vercel dev" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": { "vercel": "latest" }
+}
