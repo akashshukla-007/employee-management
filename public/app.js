@@ -3,7 +3,7 @@ const fields = [
   'site_code','pending_remark','employee_id','employee_name','surname','gender','father_spouse_name',
   'date_of_birth','nationality','education_level','date_of_joining','designation','category',
   'type_of_employment','mobile_no','uan','pan','esic_ip','lwf','aadhaar','bank_account_no','bank_name',
-  'ifsc_branch','present_address','permanent_address','service_book_no','date_of_exit','reason_exit',
+  'ifsc_branch','present_address','permanent_address','date_of_exit','reason_exit',
   'mark_for_identification','remark'
 ];
 const exportLabels = {
@@ -12,7 +12,7 @@ const exportLabels = {
   education_level:'EDUCATION LEVEL', date_of_joining:'DATE OF JOINING', designation:'DISIGNATION', category:'CATEGORY',
   type_of_employment:'TYPE OF EMPLOYMENT', mobile_no:'MOBILE No.', uan:'UAN', pan:'PAN', esic_ip:'ESIC IP', lwf:'LWF',
   aadhaar:'ADHAR', bank_account_no:'BANK A/C No.', bank_name:'BANK NAME', ifsc_branch:'IFSC (BRANCH)', present_address:'PRESENT ADRESS',
-  permanent_address:'PERMANENT ADDRESS', service_book_no:'SERVICE BOOK No.', date_of_exit:'DATE OF EXITE', reason_exit:'REASON EXITE',
+  permanent_address:'PERMANENT ADDRESS', date_of_exit:'DATE OF EXITE', reason_exit:'REASON EXITE',
   mark_for_identification:'MARK FOR IDENTIFICATION', remark:'REMARK'
 };
 
@@ -58,7 +58,7 @@ function show(id){
   if(id==='employees') renderTable(); if(id==='dashboard') updateDash();
   $('sidebar')?.classList.remove('block');
 }
-function toggleMobileNav(){ $('sidebar').classList.toggle('block'); $('sidebar').classList.toggle('hidden'); }
+function toggleMobileNav(){ const side=$('sidebar'),back=$('mobileBackdrop'); const open=side.classList.contains('hidden'); side.classList.toggle('hidden',!open); side.classList.toggle('block',open); back.classList.toggle('hidden',!open); }
 function startAdd(){resetForm();show('form');$('employee_id').focus();}
 function calcAge(){const v=$('date_of_birth').value;if(!v){$('age').value='';return}const d=new Date(v+'T00:00:00'),n=new Date();let a=n.getFullYear()-d.getFullYear();const m=n.getMonth()-d.getMonth();if(m<0||(m===0&&n.getDate()<d.getDate()))a--; $('age').value=a>=0?a:'';}
 function preview(input,id){const f=input.files[0];if(!f)return;if(f.size>5*1024*1024){toast('Image must be 5 MB or smaller.','error');input.value='';return}const img=$(id);img.src=URL.createObjectURL(f);img.classList.remove('hiddenx');}
@@ -68,7 +68,7 @@ function editEmployee(id){const e=employees.find(x=>x.id===id);if(e)fill(e);}
 async function saveEmployee(ev){
   ev.preventDefault(); const btn=$('saveBtn'); btn.disabled=true; $('formMsg').textContent='Saving employee...'; $('formMsg').className='text-sm mt-3 text-slate-500';
   try{
-    const body={}; fields.forEach(k=>body[k]=$(k)?.value||null); const id=$('editId').value;
+    const body={}; fields.forEach(k=>body[k]=$(k)?.value||null); if(body.aadhaar) body.aadhaar=body.aadhaar.replace(/\D/g,''); const id=$('editId').value;
     const d=await api(id?'/api/employees?id='+encodeURIComponent(id):'/api/employees',{method:id?'PUT':'POST',body:JSON.stringify(body)}); const emp=d.data;
     for(const [type,inputId] of [['photo','photo'],['signature','signature']]){const f=$(inputId).files[0];if(f){const data=await toDataUrl(f);await api('/api/upload',{method:'POST',body:JSON.stringify({employeeId:emp.employee_id,type,data,mimeType:f.type})});}}
     $('formMsg').textContent='Employee saved successfully.';$('formMsg').className='text-sm mt-3 text-emerald-600'; toast('Employee saved.','success'); await load(); setTimeout(()=>{resetForm();show('employees')},450);
@@ -81,12 +81,12 @@ function detail(label,value){return `<div><div class="text-xs font-semibold uppe
 function closeProfile(){$('profileModal').classList.add('hiddenx')}
 async function exportExcel(){try{toast('Preparing Excel...','info');const r=await fetch('/api/export',{credentials:'same-origin'});if(!r.ok){const d=await r.json();throw new Error(d.error||'Export failed')}const b=await r.blob();const url=URL.createObjectURL(b),a=document.createElement('a');a.href=url;a.download='employee-database-export.xlsx';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(url);toast('Excel downloaded.','success')}catch(e){toast(e.message,'error')}}
 async function importExcel(file){
-  if(!file)return; if(!confirm('Import employee rows from this Excel file? Existing Employee IDs will be skipped.'))return;
+  if(!file)return; if(!confirm('Import employee rows from this Excel file? Existing Employee IDs and Aadhaar numbers will be skipped.'))return;
   try{
     toast('Reading Excel...','info');const buf=await file.arrayBuffer();const wb=XLSX.read(buf,{type:'array',cellDates:true});const ws=wb.Sheets[wb.SheetNames[0]];const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
     const hdr=rows.findIndex(r=>String(r[4]||'').toLowerCase().includes('sr no')); if(hdr<0)throw new Error('Could not find the master header row.');
     let imported=0, skipped=0, failed=0, errors=[]; const dataRows=rows.slice(hdr+2);
-    for(const r of dataRows){const id=String(r[5]??'').trim();if(!id)continue;const body={site_code:r[2],pending_remark:r[3],employee_id:id,employee_name:r[6],surname:r[7],gender:r[8],father_spouse_name:r[9],date_of_birth:excelDate(r[10]),nationality:r[11],education_level:r[12],date_of_joining:excelDate(r[13]),designation:r[14],category:r[15],type_of_employment:r[16],mobile_no:String(r[17]??''),uan:String(r[18]??''),pan:String(r[19]??''),esic_ip:String(r[20]??''),lwf:String(r[21]??''),aadhaar:String(r[22]??''),bank_account_no:String(r[23]??''),bank_name:r[24],ifsc_branch:r[25],present_address:r[26],permanent_address:r[27],service_book_no:r[28],date_of_exit:excelDate(r[29]),reason_exit:r[30],mark_for_identification:r[31],remark:r[34]};try{await api('/api/employees',{method:'POST',body:JSON.stringify(body)});imported++}catch(e){if(e.message.includes('already exists'))skipped++;else{failed++;if(errors.length<5)errors.push(`${id}: ${e.message}`)}}}
+    for(const r of dataRows){const id=String(r[5]??'').trim();if(!id)continue;const body={site_code:r[2],pending_remark:r[3],employee_id:id,employee_name:r[6],surname:r[7],gender:r[8],father_spouse_name:r[9],date_of_birth:excelDate(r[10]),nationality:r[11],education_level:r[12],date_of_joining:excelDate(r[13]),designation:r[14],category:r[15],type_of_employment:r[16],mobile_no:String(r[17]??''),uan:String(r[18]??''),pan:String(r[19]??''),esic_ip:String(r[20]??''),lwf:String(r[21]??''),aadhaar:String(r[22]??'').replace(/\D/g,''),bank_account_no:String(r[23]??''),bank_name:r[24],ifsc_branch:r[25],present_address:r[26],permanent_address:r[27],date_of_exit:excelDate(r[29]),reason_exit:r[30],mark_for_identification:r[31],remark:r[34]};try{await api('/api/employees',{method:'POST',body:JSON.stringify(body)});imported++}catch(e){if(e.message.includes('already exists'))skipped++;else{failed++;if(errors.length<5)errors.push(`${id}: ${e.message}`)}}}
     await load();show('employees');toast(`Import complete · Imported ${imported}, skipped ${skipped}, failed ${failed}`,'success');if(errors.length)alert('Some rows failed:\n\n'+errors.join('\n'));
   }catch(e){toast(e.message,'error')}
 }
