@@ -24,7 +24,7 @@ const exportLabels = {
   aadhaar:'ADHAR', bank_account_no:'BANK A/C No.', bank_name:'BANK NAME', ifsc_branch:'IFSC (BRANCH)',
   present_address_line:'PRESENT ADDRESS', present_city:'PRESENT CITY', present_state:'PRESENT STATE', present_pincode:'PRESENT PIN CODE',
   permanent_address_line:'PERMANENT ADDRESS', permanent_city:'PERMANENT CITY', permanent_state:'PERMANENT STATE', permanent_pincode:'PERMANENT PIN CODE',
-  date_of_exit:'DATE OF EXITE', reason_exit:'REASON EXITE',
+  date_of_exit:'DATE OF EXIT', reason_exit:'REASON EXIT',
   mark_for_identification:'MARK FOR IDENTIFICATION', remark:'REMARK'
 };
 
@@ -69,7 +69,7 @@ async function loadDocumentCounts(){
 function updateDash(){
   $('statTotal').textContent=employees.length;
   $('statActive').textContent=employees.filter(e=>!e.date_of_exit).length;
-  $('statExited').textContent=employees.filter(e=>e.date_of_exit).length;
+  $('statEXITd').textContent=employees.filter(e=>e.date_of_exit).length;
   const depts={}; employees.forEach(e=>{ if(e.site_code) depts[e.site_code]=(depts[e.site_code]||0)+1; });
   $('statDepts').textContent=Object.keys(depts).length;
   const recent=[...employees].slice(-6).reverse();
@@ -94,7 +94,7 @@ function applyFilters(){
     if(q && ![e.employee_id,fullName(e),e.site_code,e.designation,e.mobile_no].join(' ').toLowerCase().includes(q)) return false;
     if(dept && e.site_code!==dept) return false;
     if(status==='active' && e.date_of_exit) return false;
-    if(status==='exited' && !e.date_of_exit) return false;
+    if(status==='EXITd' && !e.date_of_exit) return false;
     if(quickDocFilter==='missing_photo' && e.photo_url) return false;
     if(quickDocFilter==='missing_signature' && e.signature_url) return false;
     return true;
@@ -121,7 +121,7 @@ function renderTable(){
       <td class="p-3">${esc(e.mobile_no||'—')}</td>
       <td class="p-3 whitespace-nowrap">${fmtDate(e.date_of_joining)}</td>
       <td class="p-3"><div class="flex flex-wrap gap-1">${docBadges(e.employee_id)}<span class="text-xs border rounded-full px-2 py-0.5 ${e.photo_url?'text-emerald-700':'text-slate-400'}">${e.photo_url?'Photo ✓':'Photo ✗'}</span><span class="text-xs border rounded-full px-2 py-0.5 ${e.signature_url?'text-emerald-700':'text-slate-400'}">${e.signature_url?'Sign ✓':'Sign ✗'}</span></div></td>
-      <td class="p-3">${e.date_of_exit?'<span class="inline-flex px-2 py-1 rounded-full bg-red-50 text-red-700 text-xs font-semibold">Exited</span>':'<span class="inline-flex px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-semibold">Active</span>'}</td>
+      <td class="p-3">${e.date_of_exit?'<span class="inline-flex px-2 py-1 rounded-full bg-red-50 text-red-700 text-xs font-semibold">EXITd</span>':'<span class="inline-flex px-2 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-semibold">Active</span>'}</td>
       <td class="p-3 whitespace-nowrap"><button class="iconbtn mr-1" title="View" onclick="viewEmployee('${e.id}')">👁</button><button class="iconbtn mr-1" title="Edit" onclick="editEmployee('${e.id}')">✏️</button><button class="iconbtn text-red-600" title="Delete" onclick="deleteEmployee('${e.id}')">🗑</button></td>
     </tr>`).join('') || '<tr><td colspan="9" class="p-8 text-center text-slate-500">No records found.</td></tr>';
 
@@ -129,7 +129,7 @@ function renderTable(){
   const missingSig = employees.filter(e=>!e.signature_url).length;
   $('quickFocus').innerHTML = [
     `<button onclick="$('filterStatus').value='active';onFilterChange()" class="text-xs border rounded-full px-3 py-1.5 bg-white hover:bg-slate-50">Active: ${employees.filter(e=>!e.date_of_exit).length}</button>`,
-    `<button onclick="$('filterStatus').value='exited';onFilterChange()" class="text-xs border rounded-full px-3 py-1.5 bg-white hover:bg-slate-50">Exited: ${employees.filter(e=>e.date_of_exit).length}</button>`,
+    `<button onclick="$('filterStatus').value='EXITd';onFilterChange()" class="text-xs border rounded-full px-3 py-1.5 bg-white hover:bg-slate-50">EXITd: ${employees.filter(e=>e.date_of_exit).length}</button>`,
     `<button onclick="toggleQuickDoc('missing_photo')" class="text-xs border rounded-full px-3 py-1.5 ${quickDocFilter==='missing_photo'?'bg-indigo-600 text-white':'bg-white hover:bg-slate-50'}">Missing Photo: ${missingPhoto}</button>`,
     `<button onclick="toggleQuickDoc('missing_signature')" class="text-xs border rounded-full px-3 py-1.5 ${quickDocFilter==='missing_signature'?'bg-indigo-600 text-white':'bg-white hover:bg-slate-50'}">Missing Signature: ${missingSig}</button>`
   ].join('');
@@ -213,7 +213,7 @@ async function viewEmployee(id){
   $('profileTitle').textContent=`${fullName(e)} · ${e.employee_id||''}`;
   const image=e.photo_url?`<img src="${escAttr(e.photo_url)}" class="w-28 h-32 object-cover rounded-xl border" alt="Photo">`:'<div class="w-28 h-32 rounded-xl border bg-slate-50 flex items-center justify-center text-slate-400 text-xs">No photo</div>';
   const sig=e.signature_url?`<img src="${escAttr(e.signature_url)}" class="w-56 h-24 object-contain rounded-xl border" alt="Signature">`:'<div class="w-56 h-24 rounded-xl border bg-slate-50 flex items-center justify-center text-slate-400 text-xs">No signature</div>';
-  $('profileBody').innerHTML=`<div class="grid lg:grid-cols-[160px_1fr] gap-6 mb-6"><div>${image}</div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${detail('Employee ID',e.employee_id)}${detail('Site Code',e.site_code)}${detail('Designation',e.designation)}${detail('Status',e.date_of_exit?'Exited':'Active')}${detail('Age',e.age)}${detail('Blood Group',e.blood_group)}${detail('Date of Joining',fmtDate(e.date_of_joining))}</div></div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${fields.filter(k=>!['employee_id','site_code','designation','date_of_joining','blood_group',...addressFields].includes(k)).map(k=>detail(exportLabels[k]||k.replaceAll('_',' '),k.startsWith('date_')?fmtDate(e[k]):e[k])).join('')}</div><div class="grid sm:grid-cols-2 gap-4 mt-4">${detail('Permanent Address',joinAddress(e,'permanent'))}${detail('Present Address',joinAddress(e,'present'))}</div><div class="mt-6"><div class="text-sm font-bold mb-2">Specimen Signature</div>${sig}</div>
+  $('profileBody').innerHTML=`<div class="grid lg:grid-cols-[160px_1fr] gap-6 mb-6"><div>${image}</div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${detail('Employee ID',e.employee_id)}${detail('Site Code',e.site_code)}${detail('Designation',e.designation)}${detail('Status',e.date_of_exit?'EXITd':'Active')}${detail('Age',e.age)}${detail('Blood Group',e.blood_group)}${detail('Date of Joining',fmtDate(e.date_of_joining))}</div></div><div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">${fields.filter(k=>!['employee_id','site_code','designation','date_of_joining','blood_group',...addressFields].includes(k)).map(k=>detail(exportLabels[k]||k.replaceAll('_',' '),k.startsWith('date_')?fmtDate(e[k]):e[k])).join('')}</div><div class="grid sm:grid-cols-2 gap-4 mt-4">${detail('Permanent Address',joinAddress(e,'permanent'))}${detail('Present Address',joinAddress(e,'present'))}</div><div class="mt-6"><div class="text-sm font-bold mb-2">Specimen Signature</div>${sig}</div>
     <div class="mt-8"><div class="flex items-center justify-between mb-2 no-print"><h4 class="font-bold">Joining Forms</h4><div class="flex gap-2"><input type="file" id="jfFileInput" accept="image/jpeg,image/png,image/webp,application/pdf" class="hiddenx" onchange="uploadDocFromInput(this,'joining_form')"><button onclick="document.getElementById('jfFileInput').click()" class="border rounded-lg px-3 py-1.5 text-xs font-semibold bg-white">⇧ Upload</button><button onclick="openCamera('document',{category:'joining_form'})" class="border rounded-lg px-3 py-1.5 text-xs font-semibold bg-white">📷 Camera</button></div></div><div id="jfList" class="grid sm:grid-cols-2 gap-2 text-sm"><p class="text-slate-400 text-sm">Loading…</p></div></div>
     <div class="mt-6"><div class="flex items-center justify-between mb-2 no-print"><h4 class="font-bold">F11 Forms</h4><div class="flex gap-2"><input type="file" id="f11FileInput" accept="image/jpeg,image/png,image/webp,application/pdf" class="hiddenx" onchange="uploadDocFromInput(this,'f11')"><button onclick="document.getElementById('f11FileInput').click()" class="border rounded-lg px-3 py-1.5 text-xs font-semibold bg-white">⇧ Upload</button><button onclick="openCamera('document',{category:'f11'})" class="border rounded-lg px-3 py-1.5 text-xs font-semibold bg-white">📷 Camera</button></div></div><div id="f11List" class="grid sm:grid-cols-2 gap-2 text-sm"><p class="text-slate-400 text-sm">Loading…</p></div></div>
     <div class="mt-6 flex gap-2 no-print"><button onclick="editEmployee('${e.id}');closeProfile()" class="bg-indigo-600 text-white px-4 py-2 rounded-xl">Edit</button><button onclick="window.print()" class="border px-4 py-2 rounded-xl bg-white">Print</button></div>`;
