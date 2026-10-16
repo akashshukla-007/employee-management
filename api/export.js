@@ -1,175 +1,182 @@
 const ExcelJS = require('exceljs');
 const { imageSize } = require('image-size');
-const path = require('path');
-const { requireAuth, age } = require('./_lib');
-const { query } = require('./_db');
-const storage = require('./_storage');
+const { supabase, requireAuth, age } = require('./_lib');
+const { EXPORT_COLUMNS: columns } = require('./_columns');
 
-const TEMPLATE_PATH = path.join(__dirname, '..', 'templates', 'employee-export-template.xlsx');
-const PHOTO_COL = 30;      // AD in the supplied template
-const SIGNATURE_COL = 31;  // AE in the supplied template
-const IMAGE_ROW_POINTS = 48;
-const IMAGE_PADDING_PX = 6;
+// Fixed, deliberate box sizes for the Photo and Signature columns (in Excel's
+// own units) -- used both to size the column/row AND to compute how each
+// image should be scaled to fit inside that exact box. Keeping one source of
+// truth for these numbers is what keeps the column width, row height, and
+// image placement all in agreement with each other.
+const PHOTO_COL_CHARS = 12;
+const SIGNATURE_COL_CHARS = 16;
+const IMAGE_ROW_POINTS = 60;
+const IMAGE_PADDING_PX = 6; // small margin so the image never touches the cell border
 
+// Excel column widths are in "characters" of the default font; convert to an
+// approximate pixel width using the standard Calibri-11 formula. Row heights
+// are in points; 1pt = 96/72 px. These only need to be close enough for
+// visually correct centering, not pixel-perfect.
 function charsToPx(chars) { return Math.round(chars * 7 + 5); }
 function pointsToPx(points) { return Math.round(points * 96 / 72); }
 
-function extensionFromPath(p) {
-  const m = String(p || '').match(/\.([a-zA-Z0-9]+)$/);
-  const ext = (m ? m[1] : 'jpg').toLowerCase();
-  return ext === 'jpg' ? 'jpeg' : ext;
+async function signedUrl(db, bucket, path) {
+  if (!path) return null;
+  const r = await db.storage.from(bucket).createSignedUrl(path, 300);
+  return r.data?.signedUrl || null;
 }
 
-async function addFittedImage(wb, ws, storagePath, col, row, boxWpx, boxHpx) {
-  if (!storagePath) return;
+// Downloads the image, reads its real width/height, scales it down or up
+// (preserving aspect ratio -- never stretching) so it fits snugly inside the
+// given cell's pixel box, then anchors it centered within that exact cell.
+async function addFittedImage(wb, ws, url, col, row, boxWpx, boxHpx) {
+  if (!url) return;
   try {
-    const buffer = await storage.download(storagePath);
-    const extension = extensionFromPath(storagePath);
+    const response = await fetch(url);
+    if (!response.ok) return;
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const contentType = response.headers.get('content-type') || '';
+    const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : contentType.includes('gif') ? 'gif' : 'jpeg';
+
     let srcW, srcH;
     try {
       const dims = imageSize(buffer);
-      srcW = dims.width;
-      srcH = dims.height;
+      srcW = dims.width; srcH = dims.height;
     } catch (_) {
-      srcW = boxWpx;
-      srcH = boxHpx;
+      srcW = boxWpx; srcH = boxHpx; // unreadable dimensions: fall back to filling the box as a square-ish guess
     }
+
     const maxW = Math.max(1, boxWpx - IMAGE_PADDING_PX);
     const maxH = Math.max(1, boxHpx - IMAGE_PADDING_PX);
-    const scale = Math.min(maxW / srcW, maxH / srcH);
+    const scale = Math.min(maxW / srcW, maxH / srcH); // "contain" fit: never distorts, never overflows the cell
     const w = Math.max(1, Math.round(srcW * scale));
     const h = Math.max(1, Math.round(srcH * scale));
     const offXpx = Math.max(0, (boxWpx - w) / 2);
     const offYpx = Math.max(0, (boxHpx - h) / 2);
+
     const imageId = wb.addImage({ buffer, extension });
     ws.addImage(imageId, {
       tl: { col: (col - 1) + offXpx / boxWpx, row: (row - 1) + offYpx / boxHpx },
       ext: { width: w, height: h },
       editAs: 'oneCell'
     });
-  } catch (_) {
-    // Missing/unreadable image files should not prevent the Excel export.
-  }
-}
-
-function copyRowStyle(ws, sourceRowNumber, targetRowNumber, lastColumn) {
-  const source = ws.getRow(sourceRowNumber);
-  const target = ws.getRow(targetRowNumber);
-  target.height = source.height || IMAGE_ROW_POINTS;
-  for (let c = 1; c <= lastColumn; c++) {
-    const from = source.getCell(c);
-    const to = target.getCell(c);
-    if (from.hasStyle) to.style = { ...from.style };
-    if (from.numFmt) to.numFmt = from.numFmt;
-  }
+  } catch (_) { /* image failure should not prevent the spreadsheet from being generated */ }
 }
 
 module.exports = async (req, res) => {
   if (!requireAuth(req, res)) return;
   try {
-    const result = await query('select * from employees order by sr_no asc');
-    const data = result.rows;
+    const db = supabase();
+    const { data, error } = await db.from('employees').select('*').order('sr_no', { ascending: true });
+    if (error) throw error;
 
+    const bucket = process.env.SUPABASE_BUCKET || 'employee-files';
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.readFile(TEMPLATE_PATH);
-    const ws = wb.getWorksheet('ORIG-EMPLOYEE DATA BASE') || wb.worksheets[0];
-    if (!ws) throw new Error('The employee export template has no worksheet.');
+    wb.creator = 'Employee Management System';
+    wb.created = new Date();
+    const ws = wb.addWorksheet('ORIG-EMPLOYEE DATA BASE');
 
-    // Remove template/example images so only real employee images are exported.
-    for (const image of ws.getImages()) ws.removeImage(image.imageId);
+    // Recreate the important layout from the master workbook.
+    const lastLayoutCol = ws.getColumn(columns.length + 2).letter;
+    ws.getCell('E2').value = 'FORM - A (ALL SITE)';
+    ws.mergeCells(`E2:${lastLayoutCol}2`);
+    ws.getCell('E3').value = 'EMPLOYEE REGISTER';
+    ws.mergeCells(`E3:${lastLayoutCol}3`);
+    ws.getCell('E4').value = '[SHEDULE (SEE RULES No-2(1))] , PART-A [FOR ALL ESHTABLISHMENT]';
+    ws.mergeCells(`E4:${lastLayoutCol}4`);
+    ws.getCell('E5').value = 'NAME OF ESTABLISHMENT :-';
+    ws.getCell('H5').value = 'M/S NARMADA ENGINEERING';
+    ws.getCell('P5').value = 'NAME OF OWNER';
+    ws.getCell('S5').value = ':-JAGANNATH D SINGH';
+    ws.getCell('E6').value = 'ADRESS OF ESTABLISHMENTS';
+    ws.getCell('H6').value = 'E-7,4TH FLR,SIGNATURE GALLARIA,NR-,ANKLESHWAR,BHARUCH-393001(GUJ)';
+    ws.getCell('E8').value = 'f';
 
-    const firstDataRow = 10;
-    const lastTemplateRow = Math.max(ws.rowCount, firstDataRow);
-    const lastColumn = 32; // A:AF in the supplied company template
+    // Exact employee columns occupy C:AJ in the supplied master file.
+    columns.forEach((c, i) => {
+      const cell = ws.getCell(8, i + 3);
+      cell.value = c.header;
+      cell.font = { bold: true, size: 10 };
+      cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
+    ws.getRow(8).height = 42;
 
-    // Keep template formatting, but never export the example employee records
-    // that are present in the provided workbook.
-    for (let r = firstDataRow; r <= lastTemplateRow; r++) {
-      const row = ws.getRow(r);
-      for (let c = 1; c <= lastColumn; c++) row.getCell(c).value = null;
-    }
+    // Row 9 contains the field serial numbers in the source workbook.
+    columns.forEach((_, i) => {
+      const cell = ws.getCell(9, i + 3);
+      cell.value = i + 1;
+      cell.font = { bold: true, size: 9 };
+      cell.alignment = { horizontal: 'center' };
+      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    });
 
-    // The template's fixed serial row is kept as 1..32 for consistent output.
-    for (let c = 1; c <= lastColumn; c++) {
-      const cell = ws.getCell(9, c);
-      if (c === 1) cell.value = 1;
-      else cell.value = c - 1;
-    }
-
-    for (let index = 0; index < data.length; index++) {
+    for (let index = 0; index < (data || []).length; index++) {
       const e = data[index];
-      const rowNumber = firstDataRow + index;
-      if (rowNumber > lastTemplateRow) copyRowStyle(ws, firstDataRow, rowNumber, lastColumn);
+      const rowNumber = 10 + index;
       const row = ws.getRow(rowNumber);
-      const presentAddress = [
-        e.present_address_line || e.present_address,
-        e.present_city,
-        e.present_state,
-        e.present_pincode
-      ].filter(v => v !== null && v !== undefined && String(v).trim() !== '').join(', ');
-      const permanentAddress = [
-        e.permanent_address_line || e.permanent_address,
-        e.permanent_city,
-        e.permanent_state,
-        e.permanent_pincode
-      ].filter(v => v !== null && v !== undefined && String(v).trim() !== '').join(', ');
+      // Employees created before the address-split migration only have the
+      // legacy single-field present_address / permanent_address text. Fall
+      // back to that text for the "line" column so old records still export
+      // an address instead of a blank cell.
+      const presentLine = e.present_address_line || e.present_address;
+      const permanentLine = e.permanent_address_line || e.permanent_address;
+      const values = {
+        site_code: e.site_code, pending_remark: e.pending_remark, sr_no: e.sr_no || index + 1,
+        employee_id: e.employee_id, employee_name: e.employee_name, surname: e.surname, gender: e.gender,
+        blood_group: e.blood_group,
+        father_spouse_name: e.father_spouse_name, date_of_birth: e.date_of_birth ? new Date(e.date_of_birth) : null,
+        nationality: e.nationality, education_level: e.education_level,
+        date_of_joining: e.date_of_joining ? new Date(e.date_of_joining) : null, designation: e.designation,
+        category: e.category, type_of_employment: e.type_of_employment, mobile_no: e.mobile_no,
+        uan: e.uan, pan: e.pan, esic_ip: e.esic_ip, lwf: e.lwf, aadhaar: e.aadhaar,
+        bank_account_no: e.bank_account_no, bank_name: e.bank_name, ifsc_branch: e.ifsc_branch,
+        present_address_line: presentLine, present_city: e.present_city, present_state: e.present_state, present_pincode: e.present_pincode,
+        permanent_address_line: permanentLine, permanent_city: e.permanent_city, permanent_state: e.permanent_state, permanent_pincode: e.permanent_pincode,
+        date_of_exit: e.date_of_exit ? new Date(e.date_of_exit) : null,
+        reason_exit: e.reason_exit, mark_for_identification: e.mark_for_identification,
+        remark: e.remark, age: age(e.date_of_birth)
+      };
 
-      // Column mapping follows the uploaded company template exactly (A:AF).
-      // Fields absent from the database are intentionally left blank.
-      const values = [
-        e.site_code ?? '',                                      // A SITE CODE
-        e.sr_no ?? index + 1,                                   // B SR No-
-        e.employee_id ?? '',                                    // C EMP.ID No.
-        [e.employee_name, e.surname].filter(Boolean).join(' ') || '', // D EMPLOYEE NAME
-        e.surname ?? '',                                        // E SURNAME
-        e.gender ?? '',                                         // F GENDER
-        e.father_spouse_name ?? '',                             // G FATHER/SPOUSE NAME
-        e.date_of_birth ? new Date(e.date_of_birth) : '',       // H DATE OF BIRTH
-        e.nationality ?? '',                                    // I NATIONALITY
-        e.education_level ?? '',                                // J EDUCATION LEVEL
-        e.date_of_joining ? new Date(e.date_of_joining) : '',   // K DATE OF JOINING
-        e.designation ?? '',                                    // L DESIGNATION
-        e.category ?? '',                                       // M CATEGORY
-        e.type_of_employment ?? '',                             // N TYPE OF EMPLOYMENT
-        e.mobile_no ?? '',                                      // O MOBILE No.
-        e.uan ?? '',                                            // P UAN
-        e.pan ?? '',                                            // Q PAN
-        e.esic_ip ?? '',                                        // R ESIC IP
-        e.lwf ?? '',                                            // S LWF
-        e.aadhaar ?? '',                                        // T ADHAR
-        e.bank_account_no ?? '',                                // U BANK A/C No.
-        e.bank_name ?? '',                                      // V BANK NAME
-        e.ifsc_branch ?? '',                                    // W IFSC (BRANCH)
-        presentAddress,                                         // X PRESENT ADDRESS
-        permanentAddress,                                       // Y PERMANENT ADDRESS
-        e.service_book_no ?? '',                                // Z SERVICE BOOK No.
-        e.date_of_exit ? new Date(e.date_of_exit) : '',         // AA DATE OF EXIT
-        e.reason_exit ?? '',                                    // AB REASON FOR EXIT
-        e.mark_for_identification ?? '',                         // AC MARK FOR IDENTIFICATION
-        '',                                                     // AD PHOTO (image anchored below)
-        '',                                                     // AE SPECIMAN SIGNATURE (image anchored below)
-        e.remark ?? ''                                          // AF REMARK
-      ];
-
-      values.forEach((value, i) => {
-        const cell = row.getCell(i + 1);
-        cell.value = value;
-        cell.alignment = { ...(cell.alignment || {}), vertical: 'top', wrapText: true };
-        if ([8, 11, 27].includes(i + 1) && value) cell.numFmt = 'dd-mm-yyyy';
+      columns.forEach((c, i) => {
+        if (c.key === 'photo' || c.key === 'signature') return;
+        const cell = row.getCell(i + 3);
+        cell.value = values[c.key] ?? '';
+        cell.alignment = { vertical: 'top', wrapText: true };
+        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+        if (['date_of_birth', 'date_of_joining', 'date_of_exit'].includes(c.key) && cell.value) cell.numFmt = 'dd-mm-yyyy';
       });
 
+      const photoCol = columns.findIndex(c => c.key === 'photo') + 3;
+      const sigCol = columns.findIndex(c => c.key === 'signature') + 3;
+      const [photoUrl, signatureUrl] = await Promise.all([
+        signedUrl(db, bucket, e.photo_path), signedUrl(db, bucket, e.signature_path)
+      ]);
+      const rowBoxHpx = pointsToPx(IMAGE_ROW_POINTS);
+      await addFittedImage(wb, ws, photoUrl, photoCol, rowNumber, charsToPx(PHOTO_COL_CHARS), rowBoxHpx);
+      await addFittedImage(wb, ws, signatureUrl, sigCol, rowNumber, charsToPx(SIGNATURE_COL_CHARS), rowBoxHpx);
       row.height = IMAGE_ROW_POINTS;
-      await addFittedImage(wb, ws, e.photo_path, PHOTO_COL, rowNumber, charsToPx(ws.getColumn(PHOTO_COL).width || 12), pointsToPx(IMAGE_ROW_POINTS));
-      await addFittedImage(wb, ws, e.signature_path, SIGNATURE_COL, rowNumber, charsToPx(ws.getColumn(SIGNATURE_COL).width || 16), pointsToPx(IMAGE_ROW_POINTS));
     }
 
-    // Keep template's row headings, merged establishment details, column widths,
-    // borders and page layout as provided by the company workbook.
-    ws.views = [{ state: 'frozen', ySplit: 9, xSplit: 0, topLeftCell: 'A10' }];
-    ws.autoFilter = { from: 'A8', to: 'AF8' };
+    ws.freezePanes = 'C10';
+    const lastColLetter = ws.getColumn(columns.length + 2).letter;
+    ws.autoFilter = { from: 'C8', to: `${lastColLetter}8` };
+
+    // Widths keyed by column identity (not fixed column numbers), so adding
+    // or reordering columns above never silently misaligns these overrides.
+    const wideTextKeys = ['present_address_line', 'permanent_address_line'];
+    const narrowKeys = { photo: PHOTO_COL_CHARS, signature: SIGNATURE_COL_CHARS, remark: 20 };
+    for (let c = 1; c <= columns.length + 2; c++) {
+      const header = ws.getCell(8, c).value;
+      const key = columns[c - 3]?.key; // columns start at sheet column 3 (C)
+      if (c <= 2) { ws.getColumn(c).width = 4; continue; }
+      if (key && narrowKeys[key] !== undefined) { ws.getColumn(c).width = narrowKeys[key]; continue; }
+      if (key && wideTextKeys.includes(key)) { ws.getColumn(c).width = 38; continue; }
+      ws.getColumn(c).width = Math.min(38, Math.max(12, String(header || '').replace(/\n/g, ' ').length + 3));
+    }
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="employee-register-company-format.xlsx"');
+    res.setHeader('Content-Disposition', 'attachment; filename="employee-database-export.xlsx"');
     await wb.xlsx.write(res);
     return res.end();
   } catch (e) {
