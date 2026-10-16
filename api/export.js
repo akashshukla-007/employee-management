@@ -1,186 +1,219 @@
 const ExcelJS = require('exceljs');
 const { imageSize } = require('image-size');
-const { supabase, requireAuth, age } = require('./_lib');
-const { EXPORT_COLUMNS: columns } = require('./_columns');
+const path = require('path');
+const { supabase, requireAuth } = require('./_lib');
 
-// Fixed, deliberate box sizes for the Photo and Signature columns (in Excel's
-// own units) -- used both to size the column/row AND to compute how each
-// image should be scaled to fit inside that exact box. Keeping one source of
-// truth for these numbers is what keeps the column width, row height, and
-// image placement all in agreement with each other.
-const PHOTO_COL_CHARS = 12;
-const SIGNATURE_COL_CHARS = 16;
-const IMAGE_ROW_POINTS = 60;
-const IMAGE_PADDING_PX = 6; // small margin so the image never touches the cell border
+const TEMPLATE_PATH = path.join(__dirname, 'employee-export-template.xlsx');
+const BUCKET = process.env.SUPABASE_BUCKET || 'employee-files';
 
-// Excel column widths are in "characters" of the default font; convert to an
-// approximate pixel width using the standard Calibri-11 formula. Row heights
-// are in points; 1pt = 96/72 px. These only need to be close enough for
-// visually correct centering, not pixel-perfect.
+// The supplied company workbook uses columns C:AH and employee data starts at row 10.
+const FIRST_DATA_ROW = 10;
+const FIRST_DATA_COL = 3; // C
+const LAST_DATA_COL = 34; // AH
+const PHOTO_COL = 32; // AF
+const SIGNATURE_COL = 33; // AG
+const IMAGE_ROW_POINTS = 90;
+const IMAGE_PADDING_PX = 6;
+
 function charsToPx(chars) { return Math.round(chars * 7 + 5); }
 function pointsToPx(points) { return Math.round(points * 96 / 72); }
 
-async function signedUrl(db, bucket, path) {
-  if (!path) return null;
-  const r = await db.storage.from(bucket).createSignedUrl(path, 300);
-  return r.data?.signedUrl || null;
+function extensionFromContentType(contentType = '') {
+  if (contentType.includes('png')) return 'png';
+  if (contentType.includes('webp')) return 'webp';
+  if (contentType.includes('gif')) return 'gif';
+  return 'jpeg';
 }
 
-// Downloads the image, reads its real width/height, scales it down or up
-// (preserving aspect ratio -- never stretching) so it fits snugly inside the
-// given cell's pixel box, then anchors it centered within that exact cell.
-async function addFittedImage(wb, ws, url, col, row, boxWpx, boxHpx) {
+async function signedUrl(db, filePath) {
+  if (!filePath) return null;
+  const { data, error } = await db.storage.from(BUCKET).createSignedUrl(filePath, 300);
+  if (error) {
+    console.error('Could not create signed URL for employee image:', error.message);
+    return null;
+  }
+  return data?.signedUrl || null;
+}
+
+async function addFittedImage(workbook, worksheet, url, col, row, boxWidthPx, boxHeightPx) {
   if (!url) return;
   try {
     const response = await fetch(url);
     if (!response.ok) return;
     const buffer = Buffer.from(await response.arrayBuffer());
-    const contentType = response.headers.get('content-type') || '';
-    const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : contentType.includes('gif') ? 'gif' : 'jpeg';
+    const extension = extensionFromContentType(response.headers.get('content-type') || '');
 
-    let srcW, srcH;
+    let sourceWidth = boxWidthPx;
+    let sourceHeight = boxHeightPx;
     try {
-      const dims = imageSize(buffer);
-      srcW = dims.width; srcH = dims.height;
+      const dimensions = imageSize(buffer);
+      sourceWidth = dimensions.width || boxWidthPx;
+      sourceHeight = dimensions.height || boxHeightPx;
     } catch (_) {
-      srcW = boxWpx; srcH = boxHpx; // unreadable dimensions: fall back to filling the box as a square-ish guess
+      // Keep the fallback box dimensions if image metadata cannot be read.
     }
 
-    const maxW = Math.max(1, boxWpx - IMAGE_PADDING_PX);
-    const maxH = Math.max(1, boxHpx - IMAGE_PADDING_PX);
-    const scale = Math.min(maxW / srcW, maxH / srcH); // "contain" fit: never distorts, never overflows the cell
-    const w = Math.max(1, Math.round(srcW * scale));
-    const h = Math.max(1, Math.round(srcH * scale));
-    const offXpx = Math.max(0, (boxWpx - w) / 2);
-    const offYpx = Math.max(0, (boxHpx - h) / 2);
+    const maxWidth = Math.max(1, boxWidthPx - IMAGE_PADDING_PX);
+    const maxHeight = Math.max(1, boxHeightPx - IMAGE_PADDING_PX);
+    const scale = Math.min(maxWidth / sourceWidth, maxHeight / sourceHeight);
+    const width = Math.max(1, Math.round(sourceWidth * scale));
+    const height = Math.max(1, Math.round(sourceHeight * scale));
+    const offsetX = Math.max(0, (boxWidthPx - width) / 2);
+    const offsetY = Math.max(0, (boxHeightPx - height) / 2);
 
-    const imageId = wb.addImage({ buffer, extension });
-    ws.addImage(imageId, {
-      tl: { col: (col - 1) + offXpx / boxWpx, row: (row - 1) + offYpx / boxHpx },
-      ext: { width: w, height: h },
+    const imageId = workbook.addImage({ buffer, extension });
+    worksheet.addImage(imageId, {
+      tl: {
+        col: (col - 1) + offsetX / boxWidthPx,
+        row: (row - 1) + offsetY / boxHeightPx
+      },
+      ext: { width, height },
       editAs: 'oneCell'
     });
-  } catch (_) { /* image failure should not prevent the spreadsheet from being generated */ }
+  } catch (error) {
+    // A missing photo/signature should not make the whole register fail.
+    console.error('Skipping an employee photo/signature during export:', error.message);
+  }
+}
+
+function copyRowStyle(worksheet, sourceRowNumber, targetRowNumber) {
+  const source = worksheet.getRow(sourceRowNumber);
+  const target = worksheet.getRow(targetRowNumber);
+  target.height = source.height || IMAGE_ROW_POINTS;
+  for (let col = 1; col <= LAST_DATA_COL; col++) {
+    const sourceCell = source.getCell(col);
+    const targetCell = target.getCell(col);
+    if (sourceCell.hasStyle) targetCell.style = { ...sourceCell.style };
+    if (sourceCell.numFmt) targetCell.numFmt = sourceCell.numFmt;
+  }
+}
+
+function joinedAddress(line, legacy, city, state, pincode) {
+  const parts = [line || legacy, city, state, pincode]
+    .filter(value => value !== null && value !== undefined && String(value).trim() !== '')
+    .map(value => String(value).trim());
+  return parts.join(', ');
 }
 
 module.exports = async (req, res) => {
   if (!requireAuth(req, res)) return;
+
   try {
     const db = supabase();
-    const { data, error } = await db.from('employees').select('*').order('sr_no', { ascending: true });
+    const { data, error } = await db
+      .from('employees')
+      .select('*')
+      .order('sr_no', { ascending: true });
+
     if (error) throw error;
 
-    const bucket = process.env.SUPABASE_BUCKET || 'employee-files';
-    const wb = new ExcelJS.Workbook();
-    wb.creator = 'Employee Management System';
-    wb.created = new Date();
-    const ws = wb.addWorksheet('ORIG-EMPLOYEE DATA BASE');
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.readFile(TEMPLATE_PATH);
+    const worksheet = workbook.getWorksheet('ORIG-EMPLOYEE DATA BASE') || workbook.worksheets[0];
+    if (!worksheet) throw new Error('The company Excel template has no worksheet.');
 
-    // Recreate the important layout from the master workbook.
-    const lastLayoutCol = ws.getColumn(columns.length + 2).letter;
-    ws.getCell('E2').value = 'FORM - A (ALL SITE)';
-    ws.mergeCells(`E2:${lastLayoutCol}2`);
-    ws.getCell('E3').value = 'EMPLOYEE REGISTER';
-    ws.mergeCells(`E3:${lastLayoutCol}3`);
-    ws.getCell('E4').value = '[SHEDULE (SEE RULES No-2(1))] , PART-A [FOR ALL ESHTABLISHMENT]';
-    ws.mergeCells(`E4:${lastLayoutCol}4`);
-    ws.getCell('E5').value = 'NAME OF ESTABLISHMENT :-';
-    ws.getCell('H5').value = 'M/S NARMADA ENGINEERING';
-    ws.getCell('P5').value = 'NAME OF OWNER';
-    ws.getCell('S5').value = ':-JAGANNATH D SINGH';
-    ws.getCell('E6').value = 'ADRESS OF ESTABLISHMENTS';
-    ws.getCell('H6').value = 'E-7,4TH FLR,SIGNATURE GALLARIA,NR-,ANKLESHWAR,BHARUCH-393001(GUJ)';
-    ws.getCell('E8').value = 'f';
+    workbook.creator = 'Employee Management System';
+    workbook.created = new Date();
 
-    // Exact employee columns occupy C:AJ in the supplied master file.
-    columns.forEach((c, i) => {
-      const cell = ws.getCell(8, i + 3);
-      cell.value = c.header;
-      cell.font = { bold: true, size: 10 };
-      cell.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' };
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-    });
-    ws.getRow(8).height = 42;
+    // Remove any example/template pictures so only actual employee images remain.
+    for (const image of worksheet.getImages()) worksheet.removeImage(image.imageId);
 
-    // Row 9 contains the field serial numbers in the source workbook.
-    columns.forEach((_, i) => {
-      const cell = ws.getCell(9, i + 3);
-      cell.value = i + 1;
-      cell.font = { bold: true, size: 9 };
-      cell.alignment = { horizontal: 'center' };
-      cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-    });
+    // Keep the company's existing heading, merged cells, widths, borders and layout.
+    // Clear sample employee values from row 10 onward without clearing cell styles.
+    const templateLastRow = Math.max(worksheet.rowCount, FIRST_DATA_ROW);
+    for (let rowNumber = FIRST_DATA_ROW; rowNumber <= templateLastRow; rowNumber++) {
+      const row = worksheet.getRow(rowNumber);
+      for (let col = 1; col <= LAST_DATA_COL; col++) {
+        row.getCell(col).value = null;
+      }
+    }
 
-    for (let index = 0; index < (data || []).length; index++) {
-      const e = data[index];
-      const rowNumber = 10 + index;
-      const row = ws.getRow(rowNumber);
-      // Employees created before the address-split migration only have the
-      // legacy single-field present_address / permanent_address text. Fall
-      // back to that text for the "line" column so old records still export
-      // an address instead of a blank cell.
-      const presentLine = e.present_address_line || e.present_address;
-      const permanentLine = e.permanent_address_line || e.permanent_address;
-      const values = {
-        site_code: e.site_code, pending_remark: e.pending_remark, sr_no: e.sr_no || index + 1,
-        employee_id: e.employee_id, employee_name: e.employee_name, surname: e.surname, gender: e.gender,
-        blood_group: e.blood_group,
-        father_spouse_name: e.father_spouse_name, date_of_birth: e.date_of_birth ? new Date(e.date_of_birth) : null,
-        nationality: e.nationality, education_level: e.education_level,
-        date_of_joining: e.date_of_joining ? new Date(e.date_of_joining) : null, designation: e.designation,
-        category: e.category, type_of_employment: e.type_of_employment, mobile_no: e.mobile_no,
-        uan: e.uan, pan: e.pan, esic_ip: e.esic_ip, lwf: e.lwf, aadhaar: e.aadhaar,
-        bank_account_no: e.bank_account_no, bank_name: e.bank_name, ifsc_branch: e.ifsc_branch,
-        present_address_line: presentLine, present_city: e.present_city, present_state: e.present_state, present_pincode: e.present_pincode,
-        permanent_address_line: permanentLine, permanent_city: e.permanent_city, permanent_state: e.permanent_state, permanent_pincode: e.permanent_pincode,
-        date_of_exit: e.date_of_exit ? new Date(e.date_of_exit) : null,
-        reason_exit: e.reason_exit, mark_for_identification: e.mark_for_identification,
-        remark: e.remark, age: age(e.date_of_birth)
-      };
+    // Template serial row: numbered fields 1 through 32 in C:AH.
+    for (let col = FIRST_DATA_COL; col <= LAST_DATA_COL; col++) {
+      const cell = worksheet.getCell(9, col);
+      cell.value = col - FIRST_DATA_COL + 1;
+    }
 
-      columns.forEach((c, i) => {
-        if (c.key === 'photo' || c.key === 'signature') return;
-        const cell = row.getCell(i + 3);
-        cell.value = values[c.key] ?? '';
-        cell.alignment = { vertical: 'top', wrapText: true };
-        cell.border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
-        if (['date_of_birth', 'date_of_joining', 'date_of_exit'].includes(c.key) && cell.value) cell.numFmt = 'dd-mm-yyyy';
+    // These are the exact 32 employee fields in the supplied template, C:AH.
+    // A field not present in the database (e.g. service_book_no) is blank.
+    const employees = data || [];
+    for (let index = 0; index < employees.length; index++) {
+      const employee = employees[index];
+      const rowNumber = FIRST_DATA_ROW + index;
+      if (rowNumber > templateLastRow) {
+        copyRowStyle(worksheet, FIRST_DATA_ROW, rowNumber);
+      }
+
+      const row = worksheet.getRow(rowNumber);
+      row.height = IMAGE_ROW_POINTS;
+
+      const values = [
+        employee.site_code ?? '',                                      // C SITE CODE
+        employee.sr_no ?? index + 1,                                   // D SR No-
+        employee.employee_id ?? '',                                    // E EMP.ID No.
+        employee.employee_name ?? '',                                  // F EMPLOYEE NAME
+        employee.surname ?? '',                                        // G SURNAME
+        employee.gender ?? '',                                         // H GENDER
+        employee.father_spouse_name ?? '',                             // I FATHER/SPOUSE NAME
+        employee.date_of_birth || '',                                  // J DATE OF BIRTH
+        employee.nationality ?? '',                                    // K NATIONALITY
+        employee.education_level ?? '',                                // L EDUCATION LEVEL
+        employee.date_of_joining || '',                                // M DATE OF JOINING
+        employee.designation ?? '',                                    // N DISIGNATION
+        employee.category ?? '',                                       // O CATEGORY
+        employee.type_of_employment ?? '',                             // P TYPE OF EMPLOYMENT
+        employee.mobile_no ?? '',                                      // Q MOBILE No.
+        employee.uan ?? '',                                            // R UAN
+        employee.pan ?? '',                                            // S PAN
+        employee.esic_ip ?? '',                                        // T ESIC IP
+        employee.lwf ?? '',                                            // U LWF
+        employee.aadhaar ?? '',                                        // V ADHAR
+        employee.bank_account_no ?? '',                                // W BANK A/C No.
+        employee.bank_name ?? '',                                      // X BANK NAME
+        employee.ifsc_branch ?? '',                                    // Y IFSC (BRANCH)
+        joinedAddress(employee.present_address_line, employee.present_address, employee.present_city, employee.present_state, employee.present_pincode), // Z PRESENT ADDRESS
+        joinedAddress(employee.permanent_address_line, employee.permanent_address, employee.permanent_city, employee.permanent_state, employee.permanent_pincode), // AA PERMANENT ADDRESS
+        employee.service_book_no ?? '',                                // AB SERVICE BOOK No. (blank if unavailable)
+        employee.date_of_exit || '',                                   // AC DATE OF EXIT
+        employee.reason_exit ?? '',                                    // AD REASON EXIT
+        employee.mark_for_identification ?? '',                        // AE MARK FOR IDENTIFICATION
+        '',                                                            // AF PHOTO (embedded image)
+        '',                                                            // AG SPECIMAN SIGNATURE (embedded image)
+        employee.remark ?? ''                                          // AH REMARK
+      ];
+
+      values.forEach((value, offset) => {
+        const cell = row.getCell(FIRST_DATA_COL + offset);
+        cell.value = value;
+        cell.alignment = { ...(cell.alignment || {}), vertical: 'top', wrapText: true };
+        if ([10, 13, 29].includes(FIRST_DATA_COL + offset) && value) {
+          cell.value = value instanceof Date ? value : new Date(`${String(value).slice(0, 10)}T00:00:00`);
+          cell.numFmt = 'dd-mm-yyyy';
+        }
       });
 
-      const photoCol = columns.findIndex(c => c.key === 'photo') + 3;
-      const sigCol = columns.findIndex(c => c.key === 'signature') + 3;
       const [photoUrl, signatureUrl] = await Promise.all([
-        signedUrl(db, bucket, e.photo_path), signedUrl(db, bucket, e.signature_path)
+        signedUrl(db, employee.photo_path),
+        signedUrl(db, employee.signature_path)
       ]);
-      const rowBoxHpx = pointsToPx(IMAGE_ROW_POINTS);
-      await addFittedImage(wb, ws, photoUrl, photoCol, rowNumber, charsToPx(PHOTO_COL_CHARS), rowBoxHpx);
-      await addFittedImage(wb, ws, signatureUrl, sigCol, rowNumber, charsToPx(SIGNATURE_COL_CHARS), rowBoxHpx);
-      row.height = IMAGE_ROW_POINTS;
+
+      const photoWidth = charsToPx(worksheet.getColumn(PHOTO_COL).width || 12);
+      const signatureWidth = charsToPx(worksheet.getColumn(SIGNATURE_COL).width || 12);
+      const imageHeight = pointsToPx(IMAGE_ROW_POINTS);
+
+      await addFittedImage(workbook, worksheet, photoUrl, PHOTO_COL, rowNumber, photoWidth, imageHeight);
+      await addFittedImage(workbook, worksheet, signatureUrl, SIGNATURE_COL, rowNumber, signatureWidth, imageHeight);
     }
 
-    ws.freezePanes = 'C10';
-    const lastColLetter = ws.getColumn(columns.length + 2).letter;
-    ws.autoFilter = { from: 'C8', to: `${lastColLetter}8` };
-
-    // Widths keyed by column identity (not fixed column numbers), so adding
-    // or reordering columns above never silently misaligns these overrides.
-    const wideTextKeys = ['present_address_line', 'permanent_address_line'];
-    const narrowKeys = { photo: PHOTO_COL_CHARS, signature: SIGNATURE_COL_CHARS, remark: 20 };
-    for (let c = 1; c <= columns.length + 2; c++) {
-      const header = ws.getCell(8, c).value;
-      const key = columns[c - 3]?.key; // columns start at sheet column 3 (C)
-      if (c <= 2) { ws.getColumn(c).width = 4; continue; }
-      if (key && narrowKeys[key] !== undefined) { ws.getColumn(c).width = narrowKeys[key]; continue; }
-      if (key && wideTextKeys.includes(key)) { ws.getColumn(c).width = 38; continue; }
-      ws.getColumn(c).width = Math.min(38, Math.max(12, String(header || '').replace(/\n/g, ' ').length + 3));
-    }
+    worksheet.views = [{ state: 'frozen', ySplit: 9, xSplit: 2, topLeftCell: 'C10' }];
+    worksheet.autoFilter = { from: 'C8', to: 'AH8' };
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="employee-database-export.xlsx"');
-    await wb.xlsx.write(res);
+    res.setHeader('Content-Disposition', 'attachment; filename="employee-register-company-format.xlsx"');
+    await workbook.xlsx.write(res);
     return res.end();
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: e.message || 'Export failed' });
+  } catch (error) {
+    console.error('Employee Excel export failed:', error);
+    return res.status(500).json({ error: error.message || 'Export failed' });
   }
 };
